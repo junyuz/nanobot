@@ -1,0 +1,1138 @@
+# nanobot源码解析
+
+## 一、项目概览
+
+### 1. 项目定位
+nanobot 是一个超轻量级的个人 AI 助手框架，旨在提供核心代理功能的同时保持代码的简洁性和可读性。
+
+### 2. 核心特点
+- **超轻量级**：仅约 4,000 行代码，比类似项目小 99%
+- **研究友好**：代码结构清晰，易于理解和扩展
+- **快速响应**：最小化的资源占用，启动更快，迭代更迅速
+- **易于使用**：一键部署，快速上手
+
+### 3. 主要功能
+- 24/7 实时市场分析
+- 全栈软件工程师能力
+- 智能日常日程管理
+- 个人知识助手
+
+### 4. 技术栈
+- Python 3.11+
+- asyncio
+- Pydantic
+- LiteLLM
+- WebSocket
+- python-telegram-bot
+
+## 二、系统架构
+
+### 1. 架构层次
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                       接口层                            │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
+│  │    CLI      │  │  Telegram   │  │  WhatsApp   │     │
+│  └─────────────┘  └─────────────┘  └─────────────┘     │
+├─────────────────────────────────────────────────────────┤
+│                       消息层                            │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │                  MessageBus                    │   │
+│  └─────────────────────────────────────────────────┘   │
+├─────────────────────────────────────────────────────────┤
+│                       核心层                            │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │                 AgentLoop                      │   │
+│  ├─────────────┐  ┌─────────────┐  ┌─────────────┐ │   │
+│  │     LLM     │  │    Tools    │  │  Sessions   │ │   │
+│  └─────────────┘  └─────────────┘  └─────────────┘ │   │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │               ContextBuilder                   │   │
+│  ├─────────────┐  ┌─────────────┐                 │   │
+│  │   Memory    │  │   Skills    │                 │   │
+│  └─────────────┘  └─────────────┘                 │   │
+│  ┌─────────────┐                                     │   │
+│  │ Subagents   │                                     │   │
+│  └─────────────┘                                     │   │
+├─────────────────────────────────────────────────────────┤
+│                     服务层                              │
+│  ┌─────────────┐  ┌─────────────┐                     │
+│  │   Cron      │  │ Heartbeat   │                     │
+│  └─────────────┘  └─────────────┘                     │
+├─────────────────────────────────────────────────────────┤
+│                     提供商层                            │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │                 LiteLLMProvider                │   │
+│  └─────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 2. 核心组件关系
+
+1. **消息总线 (MessageBus)**：核心通信枢纽，实现组件间的解耦
+2. **AgentLoop**：核心处理引擎，协调上下文构建、LLM 调用和工具执行
+3. **通道管理 (ChannelManager)**：管理 Telegram、WhatsApp 等通信渠道
+4. **LLM 提供商 (LiteLLMProvider)**：支持多种语言模型服务
+5. **工具系统 (ToolRegistry)**：提供文件操作、网络搜索、shell 执行等能力
+6. **会话管理 (SessionManager)**：维护对话历史和状态
+7. **定时任务 (CronService)**：处理 scheduled 任务
+8. **心跳服务 (HeartbeatService)**：实现主动唤醒机制
+
+### 3. 架构说明
+
+根据源码分析，nanobot 的核心流程如下：
+
+1. **消息输入**：从 Chat Apps（Telegram、WhatsApp）或 CLI 接收消息
+2. **消息路由**：通过 MessageBus 传递给 AgentLoop
+3. **上下文构建**：AgentLoop 使用 ContextBuilder 构建包含 Memory 和 Skills 的上下文
+4. **LLM 处理**：将消息和上下文发送给 LLM 进行处理
+5. **工具执行**：LLM 可能调用 Tools 执行特定任务
+6. **子代理处理**：对于复杂任务，AgentLoop 可能创建 Subagents 进行后台处理
+7. **响应生成**：LLM 生成最终响应
+8. **消息返回**：通过 MessageBus 将响应返回给相应的通道
+
+## 三、核心业务流程
+
+### 1. 消息处理流程
+
+1. **消息接收**：通过 CLI、Telegram 或 WhatsApp 接收用户消息
+2. **消息路由**：通过 MessageBus 将消息传递给 AgentLoop
+3. **上下文构建**：AgentLoop 使用 ContextBuilder 构建包含 Memory 和 Skills 的上下文
+4. **LLM 调用**：LiteLLMProvider 调用配置的语言模型
+5. **工具执行**：处理 LLM 返回的工具调用请求，执行相应工具
+6. **子代理处理**：对于复杂任务，AgentLoop 可能创建 Subagents 进行后台处理
+7. **结果处理**：将工具执行结果返回给 LLM 进行进一步处理
+8. **响应生成**：LLM 生成最终响应
+9. **消息发送**：通过 MessageBus 将响应返回给相应通道
+
+### 2. 数据流图
+
+```
+用户 → 通道(CLI/Telegram/WhatsApp) → MessageBus → AgentLoop → ContextBuilder
+                                                              ↓
+                                                              LLM (LiteLLMProvider)
+                                                              ↓
+                                                              ToolsRegistry → Tools
+                                                              ↑              ↓
+                                                              |              |
+                                                              |              |
+AgentLoop ← 结果 ← ToolsRegistry ← 工具执行结果 ← Tools
+  ↓
+MessageBus ← 响应 ← AgentLoop
+  ↓
+通道(CLI/Telegram/WhatsApp) → 用户
+```
+
+## 四、关键模块说明
+
+### 1. 核心代理模块 (`nanobot/agent/`)
+
+**AgentLoop** (`loop.py`)：
+- 核心处理引擎，负责协调整个消息处理流程
+- 管理上下文构建、LLM 调用、工具执行和响应生成
+- 支持子代理执行后台任务
+
+**ContextBuilder** (`context.py`)：
+- 构建 LLM 上下文，包含历史记录、记忆和技能
+- 处理多媒体内容和工具执行结果
+
+**SessionManager** (`session/manager.py`)：
+- 管理对话会话和历史记录
+- 持久化会话状态到文件系统
+
+**ToolRegistry** (`agent/tools/registry.py`)：
+- 注册和管理内置工具
+- 处理工具调用请求和执行
+
+**SubagentManager** (`agent/subagent.py`)：
+- 管理子代理的创建和执行
+- 处理复杂的后台任务
+- 与主代理协同工作
+
+### 2. 通道模块 (`nanobot/channels/`)
+
+**ChannelManager** (`channels/manager.py`)：
+- 管理聊天通道并协调消息路由
+- 初始化启用的通道（Telegram、WhatsApp 等）
+- 启动/停止通道
+- 路由出站消息
+
+**TelegramChannel** (`channels/telegram.py`)：
+- Telegram 机器人集成
+- 支持文本消息和语音消息（通过 Groq Whisper 转录）
+
+**WhatsAppChannel** (`channels/whatsapp.py`)：
+- WhatsApp 集成（通过 Node.js 桥接）
+- 支持消息收发和多媒体内容
+
+### 3. 提供商模块 (`nanobot/providers/`)
+
+**LiteLLMProvider** (`providers/litellm_provider.py`)：
+- 基于 LiteLLM 实现多提供商支持
+- 支持 OpenRouter、Anthropic、OpenAI、Gemini、vLLM 等
+- 自动配置环境变量和 API 基础 URL
+
+### 4. 消息总线模块 (`nanobot/bus/`)
+
+**MessageBus** (`bus/queue.py`)：
+- 实现异步消息队列
+- 支持消息发布/订阅模式
+- 解耦通道和核心处理逻辑
+
+**Events** (`bus/events.py`)：
+- 定义消息事件类型
+- 标准化消息格式
+
+### 5. 配置模块 (`nanobot/config/`)
+
+**Config** (`config/schema.py`)：
+- 基于 Pydantic V2 的配置模式
+- 支持多提供商配置、通道配置和工具配置
+- 提供配置优先级和默认值
+
+**Loader** (`config/loader.py`)：
+- 加载和保存配置文件
+- 处理配置路径和环境变量
+
+### 6. 定时任务模块 (`nanobot/cron/`)
+
+**CronService** (`cron/service.py`)：
+- 管理定时任务和计划执行
+- 支持 cron 表达式和固定间隔执行
+- 持久化任务配置到文件系统
+
+### 7. 心跳模块 (`nanobot/heartbeat/`)
+
+**HeartbeatService** (`heartbeat/service.py`)：
+- 实现主动唤醒机制
+- 定期执行指定任务
+- 支持自定义心跳间隔
+
+## 五、工具系统
+
+### 1. 内置工具
+
+**文件工具**：
+- **ReadFileTool**：读取文件内容
+- **WriteFileTool**：写入文件内容
+- **EditFileTool**：编辑文件内容
+- **ListDirTool**：列出目录内容
+
+**Shell 工具**：
+- **ExecTool**：执行 shell 命令
+
+**Web 工具**：
+- **WebSearchTool**：使用 Brave Search 搜索网页
+- **WebFetchTool**：获取网页内容
+
+**消息工具**：
+- **MessageTool**：发送消息到聊天通道
+
+**子代理工具**：
+- **SpawnTool**：创建和管理子代理（详细说明请参考 "4.7 Subagents（子代理）" 小节）
+
+### 2. 工具执行机制
+
+1. **工具注册**：启动时注册所有内置工具
+2. **工具调用**：LLM 生成工具调用请求
+3. **参数解析**：解析工具调用参数
+4. **工具执行**：执行相应的工具
+5. **结果返回**：将执行结果返回给 LLM
+
+## 六、技能系统
+
+### 1. 技能概念
+
+**Skills 是指导文档**：Skills 本质上是 Markdown 文件（SKILL.md），包含如何使用特定工具或执行特定任务的指导
+
+**Tools 是执行引擎**：Tools 是实际执行操作的代码模块
+
+**LLM 是协调者**：LLM 阅读 Skills 文档，然后使用相应的 Tools 来执行具体操作
+
+### 2. 技能执行流程
+
+1. **技能加载**：启动时加载所有可用的技能文件
+2. **上下文构建**：将技能信息添加到 LLM 的系统提示中
+3. **技能阅读**：LLM 使用 `read_file` 工具读取相关技能的 SKILL.md 文件
+4. **工具选择**：根据技能文档的指导，LLM 选择合适的工具
+5. **工具执行**：LLM 构建工具调用请求，执行相应工具
+6. **结果处理**：LLM 解析工具执行结果，生成用户友好的响应
+
+### 3. 内置技能
+
+- **weather**：获取天气信息
+- **github**：GitHub 相关操作
+- **summarize**：内容总结
+- **tmux**：Tmux 会话管理
+
+## 七、配置系统
+
+### 1. 配置文件
+
+**配置文件路径**：`~/.nanobot/config.json`
+
+**主要配置项**：
+- **providers**：LLM 提供商配置（API 密钥等）
+- **agents**：代理默认配置（模型、参数等）
+- **channels**：通信通道配置（Telegram、WhatsApp）
+- **tools**：工具配置（如网络搜索 API 密钥）
+
+**示例配置**：
+```json
+{
+  "providers": {
+    "openrouter": {
+      "apiKey": "sk-or-v1-xxx"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-opus-4-5"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN",
+      "allowFrom": ["YOUR_USER_ID"]
+    }
+  }
+}
+```
+
+### 2. 配置管理
+
+**配置加载**：启动时加载配置文件
+**配置优先级**：环境变量 > 配置文件 > 默认值
+**配置验证**：使用 Pydantic 进行配置验证
+
+## 八、部署和使用
+
+### 1. 安装方式
+
+**从源码安装**：
+```bash
+git clone https://github.com/HKUDS/nanobot.git
+cd nanobot
+pip install -e .
+```
+
+**从 PyPI 安装**：
+```bash
+pip install nanobot-ai
+```
+
+**使用 uv 安装**：
+```bash
+uv tool install nanobot-ai
+```
+
+### 2. 初始化配置
+
+```bash
+nanobot onboard
+```
+
+### 3. 启动服务
+
+**启动网关服务**：
+```bash
+nanobot gateway
+```
+
+**与代理交互**：
+```bash
+nanobot agent -m "你好，nanobot！"
+```
+
+**交互模式**：
+```bash
+nanobot agent
+```
+
+### 4. Docker 部署
+
+```bash
+docker build -t nanobot .
+docker run -v ~/.nanobot:/root/.nanobot -p 18790:18790 nanobot gateway
+```
+
+## 九、开发和扩展
+
+### 1. 开发环境
+
+```bash
+# 安装开发依赖
+pip install -e .[dev]
+
+# 运行测试
+pytest
+
+# 代码风格检查
+ruff check .
+```
+
+### 2. 扩展指南
+
+**开发自定义工具**：
+1. 继承 `BaseTool` 类
+2. 实现 `name`、`description` 和 `execute` 方法
+3. 在 `AgentLoop._register_default_tools()` 中注册工具
+
+**开发自定义通道**：
+1. 继承 `BaseChannel` 类
+2. 实现 `start()`、`stop()` 和 `send()` 方法
+3. 在 `ChannelManager._init_channels()` 中初始化通道
+
+**开发自定义技能**：
+1. 在 `skills/` 目录创建技能目录
+2. 创建 `SKILL.md` 文件，包含技能说明和使用方法
+3. 技能会自动加载到系统中
+
+### 3. 最佳实践
+
+- **使用虚拟环境**：为每个项目创建独立的虚拟环境
+- **遵循代码风格**：使用 ruff 检查代码风格
+- **编写测试**：为新功能编写测试
+- **文档更新**：更新相关文档
+
+
+
+## 十、代码详解
+
+### 1. 项目初始化与配置场景
+
+#### 1.1 配置系统 (`nanobot/config/`)
+
+**`schema.py`**：配置模式定义，包含 `Config` 类
+- **主要功能**：基于 Pydantic V2 的配置模式，定义系统的所有配置项
+- **核心配置**：`agents`（代理配置）、`channels`（通道配置）、`providers`（LLM 提供商配置）、`tools`（工具配置）
+- **配置优先级**：环境变量 > 配置文件 > 默认值
+
+**`loader.py`**：配置加载器
+- **主要功能**：加载和保存配置文件，处理配置路径和环境变量
+- **核心方法**：`load_config()`（加载配置）、`save_config()`（保存配置）、`get_config_path()`（获取配置文件路径）
+
+#### 1.2 命令行接口 (`nanobot/cli/`)
+
+**`commands.py`**：命令定义和实现
+- **主要功能**：定义和实现 CLI 命令，是用户与系统交互的入口
+- **核心命令**：
+  - `onboard()`：初始化配置和工作区，创建默认配置文件和模板
+    - **配置文件**：
+      - `~/.nanobot/config.json`：系统的主要配置文件，包含所有配置项
+        - **providers**：LLM 提供商配置（API 密钥等）
+        - **agents**：代理默认配置（模型、参数等）
+        - **channels**：通信通道配置（Telegram、WhatsApp）
+        - **tools**：工具配置（如网络搜索 API 密钥）
+    - **模板文件**：
+      - `AGENTS.md`：代理指令和行为准则
+        - **主要内容**：定义 AI 助手的行为规范和工作指南
+        - **核心作用**：指导 LLM 如何行为和响应，确保一致性
+      - `SOUL.md`：代理人格和价值观
+        - **主要内容**：定义 nanobot 的人格特征和价值观
+        - **核心作用**：使 LLM 表现出一致的个性，增强用户体验
+      - `USER.md`：用户信息和偏好
+        - **主要内容**：存储用户相关信息和偏好设置
+        - **核心作用**：帮助 LLM 个性化响应，提供更贴心的服务
+      - `memory/MEMORY.md`：长期记忆文件
+        - **主要内容**：存储重要信息，跨会话持久化
+        - **核心作用**：帮助系统记住重要信息，提供连续的用户体验
+  - `agent()`：与代理交互，支持单条消息和交互式模式
+    - **功能**：直接与 nanobot 代理进行交互
+    - **使用方式**：
+      - 单条消息模式：`nanobot agent -m "你好，nanobot！"`
+      - 交互式模式：`nanobot agent`
+    - **详细说明**：请参考 "2. 项目启动与服务场景" 章节中的 "2.2 agent 启动流程" 小节
+  
+  - `gateway()`：启动网关服务，连接所有通道和服务
+    - **功能**：启动 nanobot 网关服务
+    - **使用方式**：`nanobot gateway`
+    - **详细说明**：请参考 "2. 项目启动与服务场景" 章节中的 "2.3 网关启动流程" 小节
+  
+  - `status()`：显示系统状态
+    - **功能**：显示 nanobot 的当前状态和配置信息
+    - **使用方式**：`nanobot status`
+  
+  - `channels` 子命令：管理通信通道
+    - **功能**：管理和监控 nanobot 的通信通道
+    - **使用方式**：
+      - 显示通道状态：`nanobot channels status`
+      - 链接 WhatsApp：`nanobot channels login`
+  
+  - `cron` 子命令：管理定时任务
+    - **功能**：管理 nanobot 的定时任务
+    - **使用方式**：
+      - 添加任务：`nanobot cron add --name "daily" --message "早上好！" --cron "0 9 * * *"`
+      - 列出任务：`nanobot cron list`
+      - 删除任务：`nanobot cron remove <task_id>`
+      - 启用/禁用任务：`nanobot cron enable <task_id> --enable true/false`
+      - 手动运行任务：`nanobot cron run <task_id>`
+
+### 2. 项目启动与服务场景
+
+#### 2.1 启动模式概览
+
+nanobot 支持多种启动模式，适应不同的使用场景：
+
+| 启动模式 | 命令 | 主要用途 | 特点 |
+|---------|------|---------|------|
+| **单条消息模式** | `nanobot agent -m "消息"` | 一次性查询、脚本集成 | 非交互式，执行后自动退出 |
+| **交互式模式** | `nanobot agent` | 持续对话、多轮交互 | 交互式，有友好的提示符，支持 Ctrl+C 退出 |
+| **网关模式** | `nanobot gateway` | 多通道服务、后台运行 | 启动所有服务组件，支持 Telegram、WhatsApp 等通道 |
+
+#### 2.2 agent 启动流程
+
+**`commands.py` 中的 `agent()` 函数**：
+- **功能**：直接与 nanobot 代理进行交互，是用户最常用的命令
+- **参数**：
+  - `--message, -m`：发送给代理的消息内容（单条消息模式）
+  - `--session, -s`：会话 ID，默认为 `cli:default`
+- **使用方式**：
+  - 单条消息模式：`nanobot agent -m "你好，nanobot！"`
+  - 交互式模式：`nanobot agent`
+- **两种模式的区别**：
+  | 特性 | 单条消息模式 | 交互式模式 |
+  |------|-------------|------------|
+  | **启动方式** | 通过 `-m` 参数传入消息 | 直接运行，无消息参数 |
+  | **交互方式** | 非交互式，一次性执行 | 交互式，持续对话 |
+  | **输入方式** | 命令行参数 | 终端实时输入，有提示符 |
+  | **退出方式** | 处理完消息后自动退出 | 通过 Ctrl+C 退出 |
+  | **会话管理** | 使用指定的 session_id | 使用相同的 session_id，但保持会话活跃 |
+  | **用户体验** | 适合脚本调用和一次性任务 | 适合持续对话和多轮交互 |
+- **内部流程**：
+  - **共同流程**：加载配置 → 创建消息总线 → 初始化 LLM 提供商 → 创建 AgentLoop → 处理消息 → 显示响应
+  - **单条消息模式**：执行一次流程后退出
+  - **交互式模式**：进入无限循环，重复执行流程直到用户退出
+- **交互式模式特点**：
+  - 显示友好的提示符：`[bold blue]You:[/bold blue]`
+  - 支持空输入处理（忽略空行）
+  - 优雅处理 Ctrl+C 退出
+  - 保持会话上下文，适合多轮对话
+
+#### 2.3 网关启动流程
+
+**`commands.py` 中的 `gateway()` 函数**：
+- **主要功能**：启动 nanobot 网关服务，初始化并启动所有组件
+- **启动流程**：
+  1. 加载配置文件
+  2. 创建消息总线 (`MessageBus`)
+  3. 初始化 LLM 提供商 (`LiteLLMProvider`)
+  4. 创建代理循环 (`AgentLoop`)
+  5. 初始化定时任务服务 (`CronService`)
+  6. 初始化心跳服务 (`HeartbeatService`)
+  7. 初始化通道管理器 (`ChannelManager`)
+  8. 启动所有服务和通道
+
+#### 2.4 服务初始化
+
+- **定时任务服务 (`CronService`)**：管理定时任务和计划执行，支持 cron 表达式和固定间隔
+- **心跳服务 (`HeartbeatService`)**：实现主动唤醒机制，定期执行指定任务
+- **详细说明**：请参考 "5. 服务层" 章节中的相关小节
+
+### 3. 消息总线与通信场景
+
+**`queue.py`**：消息队列实现，包含 `MessageBus` 类
+- **主要功能**：实现异步消息队列，支持消息发布/订阅模式，是系统组件间通信的核心，解耦了聊天通道与代理核心
+- **核心组件**：
+  - `inbound`：入站消息队列，存储从通道发送到代理的消息
+  - `outbound`：出站消息队列，存储从代理发送到通道的消息
+  - `_outbound_subscribers`：出站消息订阅者字典，按通道分类
+- **核心方法**：
+  - `publish_inbound()`：发布入站消息，将消息放入入站队列
+  - `consume_inbound()`：消费入站消息，从入站队列获取消息（阻塞直到有消息可用）
+  - `publish_outbound()`：发布出站消息，将消息放入出站队列
+  - `consume_outbound()`：消费出站消息，从出站队列获取消息（阻塞直到有消息可用）
+  - `subscribe_outbound()`：订阅出站消息，为特定通道注册回调函数
+  - `dispatch_outbound()`：分发出站消息，将消息发送给对应通道的订阅者
+  - `stop()`：停止消息分发循环
+- **工作原理**：
+  1. 通道通过 `publish_inbound()` 方法将用户消息发送到消息总线
+  2. 代理通过 `consume_inbound()` 方法从消息总线获取消息
+  3. 代理处理消息后，通过 `publish_outbound()` 方法将响应发送到消息总线
+  4. 消息总线通过 `dispatch_outbound()` 方法将响应分发给对应的通道
+  5. 通道接收响应并发送给用户
+
+**`events.py`**：事件定义
+- **主要功能**：定义消息事件类型，标准化消息格式，确保系统组件间消息传递的一致性
+- **核心类**：
+  - `InboundMessage`（入站消息）：
+    - **字段**：
+      - `channel`：通道名称（如 telegram、whatsapp）
+      - `sender_id`：发送者 ID
+      - `chat_id`：聊天/通道 ID
+      - `content`：消息内容
+      - `timestamp`：消息时间戳（默认当前时间）
+      - `media`：媒体 URL 列表
+      - `metadata`：通道特定数据
+    - **属性**：
+      - `session_key`：会话标识的唯一键，格式为 `{channel}:{chat_id}`
+  - `OutboundMessage`（出站消息）：
+    - **字段**：
+      - `channel`：通道名称
+      - `chat_id`：聊天/通道 ID
+      - `content`：消息内容
+      - `reply_to`：回复的消息 ID（可选）
+      - `media`：媒体 URL 列表
+      - `metadata`：通道特定数据
+
+### 4. 核心层
+
+#### 4.1 AgentLoop（核心处理引擎）
+
+**`loop.py`**：核心处理引擎，包含 `AgentLoop` 类
+- **主要功能**：负责协调整个消息处理流程，是系统的核心
+- **核心方法**：
+  - `run()`：启动代理循环，处理消息总线中的消息
+  - `_process_message()`：处理单条消息的核心逻辑
+    - **处理过程**：
+      1. **消息类型判断**：检查是否为系统消息（如子代理通知）
+      2. **会话管理**：获取或创建会话，用于存储对话历史
+      3. **工具上下文更新**：更新消息工具和子代理工具的上下文，确保它们能够正确路由消息
+      4. **上下文构建**：使用 `ContextBuilder` 构建包含历史记录、记忆和技能的消息上下文
+      5. **LLM 调用循环**：
+         - 调用配置的语言模型处理消息
+         - 如果 LLM 返回工具调用请求，执行相应工具
+         - 将工具执行结果添加到上下文
+         - 重复上述步骤直到 LLM 生成最终响应或达到最大迭代次数
+      6. **会话更新**：将用户消息和代理响应保存到会话历史
+      7. **响应生成**：创建并返回出站消息
+  - `process_direct()`：直接处理消息（CLI 模式）
+- **消息处理流程**：消息接收 → 上下文构建 → LLM 调用 → 工具执行 → 响应生成
+
+#### 4.2 ContextBuilder（上下文构建器）
+
+**`context.py`**：上下文构建器，包含 `ContextBuilder` 类
+- **主要功能**：构建 LLM 上下文，包含历史记录、记忆和技能，将各种信息组装成连贯的提示
+- **核心组件**：
+  - `memory`：记忆管理器，用于获取长期记忆上下文
+  - `skills`：技能加载器，用于管理和加载技能文件
+- **对外保留的方法**：
+  - `build_system_prompt()`：构建系统提示
+    - **构建过程**：
+      1. 获取核心身份信息（包括当前时间、工作区路径等）
+      2. 加载引导文件内容
+      3. 添加记忆上下文
+      4. 添加始终加载的技能完整内容
+      5. 添加可用技能的摘要信息
+    - **返回值**：完整的系统提示字符串
+  - `build_messages()`：构建完整消息列表
+    - **构建过程**：
+      1. 添加系统提示
+      2. 添加对话历史记录
+      3. 添加当前用户消息（支持媒体内容）
+    - **返回值**：用于 LLM 调用的消息列表
+  - `add_tool_result()`：添加工具执行结果到消息列表
+  - `add_assistant_message()`：添加助手消息到消息列表
+
+- **内部方法**：
+  - `_get_identity()`：获取核心身份信息
+  - `_load_bootstrap_files()`：加载引导文件
+    - **加载文件**：`AGENTS.md`、`SOUL.md`、`USER.md`、`TOOLS.md`、`IDENTITY.md`
+    - **返回值**：合并后的引导文件内容
+  - `_build_user_content()`：构建用户消息内容（支持媒体）
+
+- **核心方法调用关系**：
+  1. `build_messages()` → `build_system_prompt()`：构建完整消息列表时，首先构建系统提示
+  2. `build_messages()` → `_build_user_content()`：构建完整消息列表时，处理当前用户消息（包括媒体内容）
+  3. `build_system_prompt()` → `_get_identity()`：构建系统提示时，获取核心身份信息
+  4. `build_system_prompt()` → `_load_bootstrap_files()`：构建系统提示时，加载引导文件内容
+  5. `build_system_prompt()` → `memory.get_memory_context()`：构建系统提示时，获取记忆上下文
+  6. `build_system_prompt()` → `skills.get_always_skills()`：构建系统提示时，获取始终加载的技能
+  7. `build_system_prompt()` → `skills.build_skills_summary()`：构建系统提示时，获取可用技能摘要
+- **引导文件**：
+  - `AGENTS.md`：代理指令和行为准则
+  - `SOUL.md`：代理人格和价值观
+  - `USER.md`：用户信息和偏好
+  - `TOOLS.md`：工具使用说明
+  - `IDENTITY.md`：代理身份信息
+- **工作原理**：
+  1. **渐进式技能加载**：
+     - 始终加载的技能：包含完整内容在系统提示中
+     - 可用技能：只在系统提示中包含摘要，LLM 需要时通过 `read_file` 工具读取完整内容
+  2. **多模态支持**：
+     - 支持处理包含图片的消息，将图片转换为 base64 编码后添加到消息中
+  3. **上下文组装**：
+     - 将身份信息、引导文件、记忆、技能和对话历史组装成连贯的上下文
+     - 确保 LLM 获得足够的信息来理解和响应用户请求
+
+#### 4.3 Memory（记忆管理）
+
+**`memory.py`**：记忆管理，包含 `MemoryStore` 类
+- **主要功能**：管理长期记忆和短期记忆，提供记忆上下文，支持日常笔记和长期记忆存储
+- **核心组件**：
+  - `memory_dir`：记忆文件存储目录
+  - `memory_file`：长期记忆文件（MEMORY.md）
+- **核心方法**：
+  - `get_memory_context()`：获取记忆上下文
+    - **获取内容**：长期记忆、今日笔记
+    - **返回值**：格式化的记忆上下文字符串
+  - `read_long_term()`：读取长期记忆（MEMORY.md）
+  - `write_long_term()`：写入长期记忆（MEMORY.md）
+  - `read_today()`：读取今日记忆笔记
+  - `append_today()`：向今日记忆笔记追加内容
+  - `get_recent_memories()`：获取最近 N 天的记忆
+  - `list_memory_files()`：列出所有记忆文件（按日期倒序）
+- **工作原理**：
+  1. **记忆存储结构**：
+     - 长期记忆：存储在 `memory/MEMORY.md` 文件中
+     - 日常笔记：存储在 `memory/YYYY-MM-DD.md` 文件中（按日期命名）
+  2. **记忆加载策略**：
+     - 系统提示中包含长期记忆和今日笔记
+     - 最近 7 天的记忆可通过 `get_recent_memories()` 方法获取
+  3. **记忆更新机制**：
+     - 长期记忆：通过 `write_long_term()` 方法直接写入
+     - 日常笔记：通过 `append_today()` 方法追加内容，自动添加日期头
+  4. **记忆使用场景**：
+     - 系统提示构建：提供历史记忆上下文
+     - 对话参考：帮助 LLM 了解过去的对话内容和重要信息
+     - 日常记录：存储和回顾每日重要事件和信息
+
+`当前模块的这些写入方法目前版本并没有调用，在系统提示词中有相关目录描述，然后调用工具直接写入，入口在nanobot\agent\context.py _get_identity`
+
+#### 4.4 Tools（工具系统）
+
+**`registry.py`**：工具注册表，包含 `ToolRegistry` 类
+- **主要功能**：注册和管理工具，是工具系统的核心
+- **核心方法**：`register()`（注册工具）、`execute()`（执行工具调用）、`get_definitions()`（获取工具定义）
+
+**`base.py`**：工具基类，包含 `BaseTool` 类
+- **主要功能**：定义工具的基本接口，所有工具的父类
+- **核心方法**：`execute()`（执行工具）、`get_definition()`（获取工具定义）
+
+**`filesystem.py`**：文件系统工具
+- **`ReadFileTool`**：读取文件内容
+- **`WriteFileTool`**：写入文件内容
+- **`EditFileTool`**：编辑文件内容
+- **`ListDirTool`**：列出目录内容
+
+**`shell.py`**：Shell 执行工具，包含 `ExecTool` 类
+- **主要功能**：执行 shell 命令，支持工作目录限制和超时设置
+- **核心方法**：`execute()`（执行 shell 命令）
+
+**`web.py`**：Web 工具
+- **`WebSearchTool`**：使用 Brave Search 搜索网页
+- **`WebFetchTool`**：获取网页内容并提取主要信息
+
+**`message.py`**：消息发送工具，包含 `MessageTool` 类
+- **主要功能**：发送消息到聊天通道
+- **核心方法**：`execute()`（发送消息）
+
+**`spawn.py`**：子代理生成工具，包含 `SpawnTool` 类
+- **主要功能**：创建和管理子代理，处理复杂的后台任务
+- **核心方法**：`execute()`（生成子代理）
+
+#### 4.5 Skills（技能系统）
+
+**`skills.py`**：技能加载器，包含 `SkillsLoader` 类
+- **主要功能**：加载和管理技能文件，是技能系统的核心
+- **核心方法**：`list_skills()`（列出技能）、`load_skill()`（加载技能）、`build_skills_summary()`（构建技能摘要）
+- **技能加载**：
+  1. **始终加载的技能**：完整内容包含在系统提示中
+  2. **可用技能**：只在系统提示中包含摘要，LLM 需要时通过 `read_file` 工具读取完整内容
+
+**内置技能**：
+- **`weather/`**：天气查询技能
+  - **主要功能**：获取当前天气和天气预报
+  - **实现方式**：使用 wttr.in 和 Open-Meteo API
+
+- **`github/`**：GitHub 相关操作技能
+  - **主要功能**：GitHub 仓库查询、PR 管理等
+
+- **`summarize/`**：内容总结技能
+  - **主要功能**：总结长文本内容
+
+- **`tmux/`**：Tmux 会话管理技能
+  - **主要功能**：管理 Tmux 会话
+
+- **`skill-creator/`**：技能创建技能
+  - **主要功能**：帮助用户创建自定义技能
+
+#### 4.6 Sessions（会话管理）
+
+**`session/manager.py`**：会话管理器，包含 `SessionManager` 类
+- **主要功能**：管理对话会话和历史记录，持久化会话状态
+- **核心方法**：`get_or_create()`（获取或创建会话）、`save()`（保存会话）、`get_history()`（获取会话历史）
+- **会话存储**：使用文件系统存储会话数据，每个会话一个文件
+
+#### 4.7 Subagents（子代理）
+
+**`spawn.py`**：子代理生成工具，包含 `SpawnTool` 类
+- **主要功能**：创建和管理子代理，处理复杂的后台任务
+- **核心组件**：
+  - `_manager`：子代理管理器，负责实际的子代理创建和管理
+  - `_origin_channel`：原始通道，用于子代理结果的通知
+  - `_origin_chat_id`：原始聊天 ID，用于子代理结果的通知
+- **核心方法**：
+  - `set_context()`：设置子代理通知的原始上下文
+  - `execute()`：生成子代理执行给定任务
+    - **参数**：
+      - `task`：子代理要完成的任务描述
+      - `label`：任务的可选简短标签（用于显示）
+    - **返回值**：指示子代理已启动的状态消息
+
+**`subagent.py`**：子代理管理器，包含 `SubagentManager` 类
+- **主要功能**：管理后台子代理执行，处理子代理的生命周期和结果通知
+- **核心组件**：
+  - `_running_tasks`：当前运行的子代理任务字典
+- **核心方法**：
+  - `spawn()`：生成子代理在后台执行任务
+    - **参数**：
+      - `task`：子代理的任务描述
+      - `label`：任务的可选人类可读标签
+      - `origin_channel`：结果通知的通道
+      - `origin_chat_id`：结果通知的聊天 ID
+    - **返回值**：指示子代理已启动的状态消息
+  - `_run_subagent()`：执行子代理任务并通知结果
+  - `_announce_result()`：通过消息总线向主代理通知子代理结果
+  - `_build_subagent_prompt()`：为子代理构建专注的系统提示
+
+- **工作原理**：
+  1. **子代理生成**：
+     - 主代理通过 `SpawnTool` 工具生成子代理
+     - 子代理获得独立的执行环境和专注的系统提示
+     - 子代理在后台异步执行任务
+  2. **任务执行**：
+     - 子代理可以使用文件操作、shell 命令、网络搜索等工具
+     - 子代理执行任务时，主代理可以继续处理其他请求
+     - 子代理执行有限的迭代次数（最多 15 次）
+  3. **结果通知**：
+     - 子代理完成任务后，通过消息总线向主代理发送系统消息
+     - 主代理接收结果并总结给用户
+     - 结果通知包含任务描述和执行结果
+  4. **生命周期管理**：
+     - 子代理任务完成后自动清理
+     - 主代理可以跟踪当前运行的子代理数量
+
+- **应用场景**：
+  - **复杂任务**：需要多步骤处理的复杂任务
+  - **耗时任务**：网络搜索、文件处理等可能耗时的任务
+  - **后台任务**：不需要用户等待的后台处理任务
+  - **并行任务**：需要与主代理并行执行的任务
+
+- **限制**：
+  - 子代理不能发送消息给用户（无 message 工具）
+  - 子代理不能生成其他子代理（无 spawn 工具）
+  - 子代理不能访问主代理的对话历史
+  - 子代理执行次数有限制（最多 15 次迭代）
+
+### 5. 服务层
+
+#### 5.1 Cron（定时任务服务）
+
+**`cron/service.py`**：定时任务服务，包含 `CronService` 类
+- **主要功能**：管理定时任务和计划执行，支持 cron 表达式和固定间隔
+- **核心方法**：`start()`（启动服务）、`stop()`（停止服务）、`add_job()`（添加任务）、`remove_job()`（删除任务）、`run_job()`（执行任务）
+- **调度方式**：
+  - 一次性执行（at）：在指定时间点执行一次
+  - 固定间隔执行（every）：每隔指定时间执行一次
+  - Cron 表达式执行（cron）：按照标准 cron 表达式执行
+- **应用场景**：用户提醒、定期操作、计划任务
+- **工作原理**：
+  1. 服务启动时加载任务列表
+  2. 计算每个任务的下次执行时间
+  3. 设置定时器，在最早的下次执行时间唤醒
+  4. 到达执行时间时，执行所有到期的任务
+  5. 执行任务并更新任务状态
+  6. 计算任务的下次执行时间（如果是重复任务）
+  7. 重新设置定时器
+- **实现特点**：
+  - 使用单一定时器管理所有任务，减少资源消耗
+  - 动态调整定时器，根据最早的下次执行时间
+  - 毫秒级时间戳确保调度精度
+  - 完整的任务生命周期管理
+  - 持久化存储任务信息
+
+**`cron/types.py`**：定时任务类型定义
+- **主要功能**：定义定时任务相关的类型
+- **核心类**：`CronSchedule`（任务调度）、`CronJob`（定时任务）、`CronJobPayload`（任务负载）
+
+#### 5.2 Heartbeat（心跳服务）
+
+**`heartbeat/service.py`**：心跳服务，包含 `HeartbeatService` 类
+- **主要功能**：实现主动唤醒机制，定期执行指定任务
+- **核心方法**：`start()`（启动服务）、`stop()`（停止服务）、`_run_heartbeat()`（执行心跳任务）
+- **默认间隔**：30 分钟
+- **工作原理**：
+  1. 定期（每 30 分钟）唤醒
+  2. 读取 `HEARTBEAT.md` 文件
+  3. 检查文件是否包含可执行内容
+  4. 如果有内容，唤醒代理执行任务
+  5. 代理读取文件并执行其中的任务
+  6. 返回执行结果
+- **应用场景**：系统维护、监控与警报、自动化工作流
+
+### 6. 提供商层
+
+#### 6.1 LiteLLMProvider（LLM 提供商）
+
+**`providers/litellm_provider.py`**：LiteLLM 提供商实现，包含 `LiteLLMProvider` 类
+- **主要功能**：基于 LiteLLM 实现多提供商支持，是系统的默认提供商
+- **支持的提供商**：OpenRouter、Anthropic、OpenAI、Gemini、vLLM、Groq 等
+- **核心方法**：`chat()`（调用语言模型）、`_parse_response()`（解析模型响应）
+
+**`providers/base.py`**：提供商基类，包含 `LLMProvider` 类
+- **主要功能**：定义 LLM 提供商的基本接口，所有提供商的父类
+- **核心方法**：`chat()`（聊天完成）、`get_default_model()`（获取默认模型）
+
+**`providers/transcription.py`**：语音转录服务
+- **主要功能**：提供语音转文本服务，支持 Telegram 语音消息
+- **核心方法**：`transcribe()`（转录语音）
+
+### 7. 接口层
+
+#### 7.1 通信通道场景
+
+##### 7.1.1 通道管理 (`nanobot/channels/`)
+
+**`manager.py`**：通道管理器，包含 `ChannelManager` 类
+- **主要功能**：管理聊天通道并协调消息路由
+- **核心方法**：`_init_channels()`（初始化通道）、`start_all()`（启动所有通道）、`stop_all()`（停止所有通道）、`_dispatch_outbound()`（分发出站消息）
+
+**`base.py`**：通道基类，包含 `BaseChannel` 类
+- **主要功能**：定义通道的基本接口，所有通道的父类
+- **核心方法**：
+  - `start()`：启动通道，开始监听消息
+  - `stop()`：停止通道，清理资源
+  - `send()`：发送消息通过该通道
+  - `_handle_message()`：处理来自聊天平台的入站消息
+
+- **收消息流程**（Inbound）：
+  1. **用户发送消息**：用户在聊天平台（如 Telegram）发送消息
+  2. **通道接收消息**：
+     - 具体通道实现（如 TelegramChannel）的消息处理方法（如 `_on_message`）接收消息
+     - 提取消息内容、发送者 ID、聊天 ID 等信息
+     - 处理媒体文件（如图片、语音等）
+  3. **消息转换**：
+     - 调用 `_handle_message()` 方法
+     - 检查发送者是否被允许
+     - 将消息转换为 `InboundMessage` 格式
+  4. **消息发布**：
+     - 通过 `MessageBus.publish_inbound()` 发布入站消息
+  5. **Agent 处理**：
+     - `AgentLoop` 的 `run()` 方法消费入站消息
+     - 调用 `_process_message()` 方法处理消息
+     - 生成响应
+
+- **发消息流程**（Outbound）：
+  1. **Agent 生成响应**：
+     - `AgentLoop` 处理消息后生成响应
+     - 通过 `MessageBus.publish_outbound()` 发布出站消息
+  2. **消息分发**：
+     - `MessageBus` 的 `dispatch_outbound()` 方法分发出站消息
+     - 将消息发送给对应通道的订阅者
+  3. **通道发送消息**：
+     - 具体通道实现的 `send()` 方法接收消息
+     - 转换消息格式（如 Markdown 到 HTML）
+     - 通过聊天平台 API 发送消息
+  4. **用户接收**：
+     - 聊天平台 API 将消息发送到用户的客户端
+     - 用户在聊天平台中看到消息
+
+#### 7.1.2 具体通道实现
+
+**`telegram.py`**：Telegram 通道，包含 `TelegramChannel` 类
+- **主要功能**：Telegram 机器人集成，支持文本消息和语音消息
+- **语音支持**：通过 Groq Whisper 进行语音转文本
+- **核心方法**：`start()`（启动 Telegram 机器人）、`stop()`（停止机器人）、`send()`（发送消息）
+
+**`whatsapp.py`**：WhatsApp 通道，包含 `WhatsAppChannel` 类
+- **主要功能**：WhatsApp 集成（通过 Node.js 桥接），支持消息收发和多媒体内容
+- **核心方法**：`start()`（启动 WhatsApp 客户端）、`stop()`（停止客户端）、`send()`（发送消息）
+
+### 8. 数据流向总结
+
+**完整数据流向**：
+1. **用户输入**：用户通过 CLI、Telegram 或 WhatsApp 发送消息
+2. **消息路由**：消息通过 `MessageBus` 传递给 `AgentLoop`
+3. **上下文构建**：`AgentLoop` 使用 `ContextBuilder` 构建包含历史记录、记忆和技能的上下文
+4. **LLM 调用**：`AgentLoop` 通过 `LiteLLMProvider` 调用配置的语言模型
+5. **工具执行**：如果 LLM 返回工具调用请求，`AgentLoop` 通过 `ToolRegistry` 执行相应工具
+6. **技能使用**：LLM 可能使用 `read_file` 工具读取技能文件，然后执行相应操作
+7. **响应生成**：LLM 生成最终响应
+8. **消息返回**：响应通过 `MessageBus` 返回给相应通道，最终发送给用户
+
+## 十一、故障排除
+
+### 1. 常见问题
+
+**API 密钥错误**：
+- 检查配置文件中的 API 密钥
+- 确保 API 密钥格式正确
+- 确保 API 密钥有足够的权限
+
+**通道连接错误**：
+- 检查网络连接
+- 检查通道配置
+- 检查通道服务状态
+
+**工具执行错误**：
+- 检查工具参数
+- 检查工具依赖
+- 检查工具权限
+
+### 2. 调试技巧
+
+**启用详细日志**：
+```bash
+nanobot gateway --verbose
+```
+
+**查看通道状态**：
+```bash
+nanobot channels status
+```
+
+**管理定时任务**：
+```bash
+nanobot cron list
+```
+
+**检查系统状态**：
+```bash
+nanobot status
+```
+
+## 十一、总结
+
+nanobot 是一个设计精良的轻量级个人 AI 助手框架，通过模块化架构和消息总线实现了组件间的解耦通信。系统核心是 AgentLoop，它协调上下文构建、LLM 调用和工具执行，实现了完整的 AI 助手功能。
+
+nanobot 的主要优势在于其轻量级设计和模块化架构，使得系统易于理解、扩展和部署。同时，通过支持多种 LLM 提供商和通信通道，nanobot 提供了灵活的集成能力，可以适应不同的使用场景和需求。
+
+作为一个研究友好的框架，nanobot 为 AI 助手技术的研究和实验提供了一个理想的平台，同时也可以作为个人日常使用的智能助手。其简洁的代码结构和清晰的架构设计，使其成为学习 AI 助手开发的优秀案例。
+
+## 十二、附录
+
+### 1. 项目结构
+
+```
+nanobot/
+├── agent/          # 🧠 核心代理逻辑
+├── bus/            # 🚌 消息路由
+├── channels/       # 📱 通信渠道（Telegram、WhatsApp）
+├── config/         # ⚙️ 配置管理
+├── cron/           # ⏰ 定时任务
+├── heartbeat/      # 💓 心跳机制
+├── providers/      # 🤖 LLM 提供商集成
+├── session/        # 💬 会话管理
+├── skills/         # 🎯 内置技能
+├── utils/          # 🛠️ 工具函数
+├── cli/            # 🖥️ 命令行接口
+└── __main__.py     # 🚪 主入口
+```
+
+### 2. 依赖项
+
+**核心依赖**：
+- typer>=0.9.0
+- litellm>=1.0.0
+- pydantic>=2.0.0
+- pydantic-settings>=2.0.0
+- websockets>=12.0
+- websocket-client>=1.6.0
+- httpx>=0.25.0
+- loguru>=0.7.0
+- readability-lxml>=0.8.0
+- rich>=13.0.0
+- croniter>=2.0.0
+- python-telegram-bot>=21.0
+
+**开发依赖**：
+- pytest>=7.0.0
+- pytest-asyncio>=0.21.0
+- ruff>=0.1.0
+
+### 3. 命令参考
+
+| 命令 | 描述 |
+|------|------|
+| `nanobot onboard` | 初始化配置和工作区 |
+| `nanobot agent -m "..."` | 与代理交互 |
+| `nanobot agent` | 交互式聊天模式 |
+| `nanobot gateway` | 启动网关服务 |
+| `nanobot status` | 显示状态 |
+| `nanobot channels login` | 链接 WhatsApp（扫描二维码） |
+| `nanobot channels status` | 显示通道状态 |
+| `nanobot cron add` | 添加定时任务 |
+| `nanobot cron list` | 列出定时任务 |
+| `nanobot cron remove` | 删除定时任务 |
+| `nanobot cron enable` | 启用或禁用定时任务 |
+| `nanobot cron run` | 手动运行定时任务 |
+
+### 4. 配置参考
+
+**提供商配置**：
+
+| 提供商 | 用途 | 获取 API 密钥 |
+|--------|------|---------------|
+| `openrouter` | LLM（推荐，访问所有模型） | [openrouter.ai](https://openrouter.ai) |
+| `anthropic` | LLM（Claude 直接） | [console.anthropic.com](https://console.anthropic.com) |
+| `openai` | LLM（GPT 直接） | [platform.openai.com](https://platform.openai.com) |
+| `groq` | LLM + 语音转录（Whisper） | [console.groq.com](https://console.groq.com) |
+| `gemini` | LLM（Gemini 直接） | [aistudio.google.com](https://aistudio.google.com) |
+
+**通道配置**：
+
+| 通道 | 配置项 | 说明 |
+|------|--------|------|
+| `telegram` | `enabled` | 是否启用 |
+| `telegram` | `token` | 机器人令牌 |
+| `telegram` | `allowFrom` | 允许的用户 ID |
+| `whatsapp` | `enabled` | 是否启用 |
+| `whatsapp` | `bridge_url` | WhatsApp 桥接 URL |
+| `whatsapp` | `allowFrom` | 允许的电话号码 |
+
+### 5. 常见场景
+
+**使用天气技能**：
+```bash
+nanobot agent -m "北京今天的天气怎么样？"
+```
+
+**使用 web 搜索**：
+```bash
+nanobot agent -m "搜索最新的 Python 3.12 特性"
+```
+
+**使用文件工具**：
+```bash
+nanobot agent -m "读取当前目录的 README.md 文件"
+```
+
+**使用 shell 工具**：
+```bash
+nanobot agent -m "列出当前目录的文件"
+```
+
+**设置定时任务**：
+```bash
+nanobot cron add --name "daily" --message "早上好！今天有什么计划？" --cron "0 9 * * *"
+```
+
+## 十三、更新日志
+
+### 版本 0.1.0
+- 初始版本发布
+- 支持基本的代理功能
+- 支持 Telegram 和 WhatsApp 通道
+- 支持多种 LLM 提供商
+
+### 版本 0.1.1
+- 添加语音转录支持（通过 Groq Whisper）
+- 改进工具执行机制
+- 修复已知问题
+
+### 版本 0.1.2
+- 添加子代理支持
+- 改进会话管理
+- 优化配置系统
+
+### 版本 0.1.3
+- 添加定时任务功能
+- 添加心跳机制
+- 改进技能系统
+
+---
+
+希望这份文档能够帮助你理解和使用 nanobot 项目。如果你有任何问题或建议，请随时联系我！
